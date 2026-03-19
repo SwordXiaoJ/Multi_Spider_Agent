@@ -1,35 +1,28 @@
 #!/bin/bash
-# Safely stop PiCrawler agent
-# Sits robot down before killing processes
+# Emergency stop: kill everything, then sit robot down
+# Usage: ./stop.sh
 
-echo "Stopping PiCrawler Agent..."
+echo "=== EMERGENCY STOP ==="
 
-# 1. Let robot sit down safely (only if not mock mode)
-if pgrep -f "agent_picrawler.main" > /dev/null 2>&1; then
-    echo "[1/3] Sitting robot down..."
-    /home/pi/agent_picrawler/venv/bin/python3 -c "
-try:
-    from picrawler import Picrawler
-    Picrawler().do_step('sit', 50)
-    print('      Robot sat down.')
-except:
-    print('      Skip (mock mode or hardware not available)')
-" 2>/dev/null
-else
-    echo "[1/3] Agent not running, skip sit"
-fi
+# 1. Kill agent (releases GPIO)
+echo "[1/3] Killing agent..."
+pkill -9 -f "agent_picrawler.main" 2>/dev/null && echo "      Agent killed" || echo "      Agent was not running"
+sleep 2
 
-# 2. Kill agent
-echo "[2/3] Stopping agent..."
-pkill -f "agent_picrawler.main" 2>/dev/null && echo "      Agent stopped" || echo "      Agent was not running"
-sleep 1
+# 2. Reset robot to default position (all servos to 0 = power-on state)
+echo "[2/3] Resetting robot to default position..."
+python3 -c "
+from picrawler import Picrawler
+p = Picrawler()
+print('      Robot reset to default.')
+" 2>/dev/null || echo "      Skip (hardware not available)"
 
 # 3. Kill camera stream
 echo "[3/3] Stopping camera..."
-pkill -f "remote_stream.py" 2>/dev/null && echo "      Camera stopped" || echo "      Camera was not running"
+pkill -9 -f "remote_stream.py" 2>/dev/null && echo "      Camera stopped" || echo "      Camera was not running"
 
 # Clean PID files
 rm -f /tmp/picrawler_stream.pid /tmp/picrawler_agent.pid
 
 echo ""
-echo "All services stopped."
+echo "All stopped."

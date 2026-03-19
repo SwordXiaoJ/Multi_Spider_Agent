@@ -14,11 +14,6 @@ load_dotenv(Path(__file__).parent / ".env")
 # Agent identity (change per Pi)
 AGENT_ID = os.getenv("AGENT_ID", "crawler-alpha-patrol-001")
 
-# Central computer
-CENTRAL_URL = os.getenv("CENTRAL_URL", "http://192.168.1.100")
-CENTRAL_GATEWAY_PORT = int(os.getenv("CENTRAL_GATEWAY_PORT", "8080"))
-CENTRAL_YOLO_PORT = int(os.getenv("CENTRAL_YOLO_PORT", "8090"))
-
 # Local ports
 AGENT_PORT = int(os.getenv("AGENT_PORT", "9004"))
 STREAM_PORT = int(os.getenv("STREAM_PORT", "9000"))
@@ -31,6 +26,9 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # Mock mode: True = only log, no hardware movement
 MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() in ("true", "1", "yes")
+
+# Speaker: TTS and sound effects (default OFF)
+SPEAKER_ENABLED = os.getenv("SPEAKER_ENABLED", "false").lower() in ("true", "1", "yes")
 
 # Calibration (measure and adjust per robot)
 STEP_DISTANCE_CM = float(os.getenv("STEP_DISTANCE_CM", "2.5"))

@@ -1,6 +1,7 @@
 """
-PiCrawler movement control with dead-reckoning position tracking.
+Hardware driver: PiCrawler servo control with dead-reckoning position tracking.
 
+Talks directly to PiCrawler servos and ultrasonic sensor.
 MOCK_MODE (default): only logs actions, no hardware movement.
 Set MOCK_MODE=false to drive the real robot.
 """
@@ -14,6 +15,7 @@ from agent_picrawler.config import (
     MOCK_MODE, STEP_DISTANCE_CM, DEGREES_PER_TURN_STEP,
     OBSTACLE_THRESHOLD_CM, PATROL_SPEED,
 )
+from agent_picrawler import speaker
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,123 @@ class CrawlerControl:
         self.heading = (self.heading + DEGREES_PER_TURN_STEP * steps) % 360
         logger.debug(f"Heading after turn_right({steps}): {self.heading:.1f}°")
 
+    def push_up(self, steps: int = 1):
+        """Do push-ups."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] push_up({steps})")
+        else:
+            self.crawler.do_action("push up", steps, self.speed)
+            time.sleep(0.5)
+
+    def wave(self, steps: int = 1):
+        """Wave gesture."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] wave({steps})")
+        else:
+            self.crawler.do_action("wave", steps, self.speed)
+            time.sleep(0.5)
+
+    def look_left(self, steps: int = 1):
+        """Look left."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] look_left({steps})")
+        else:
+            self.crawler.do_action("look left", steps, self.speed)
+            time.sleep(0.3)
+
+    def look_right(self, steps: int = 1):
+        """Look right."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] look_right({steps})")
+        else:
+            self.crawler.do_action("look right", steps, self.speed)
+            time.sleep(0.3)
+
+    def look_up(self, steps: int = 1):
+        """Look up."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] look_up({steps})")
+        else:
+            self.crawler.do_action("look up", steps, self.speed)
+            time.sleep(0.3)
+
+    def look_down(self, steps: int = 1):
+        """Look down."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] look_down({steps})")
+        else:
+            self.crawler.do_action("look down", steps, self.speed)
+            time.sleep(0.3)
+
+    def dance(self, steps: int = 1):
+        """Dance."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] dance({steps})")
+        else:
+            self.crawler.do_action("dance", steps, self.speed)
+            time.sleep(0.5)
+
+    def turn_left_angle(self, steps: int = 5):
+        """Turn left with body tilting (angular turn)."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] turn_left_angle({steps})")
+        else:
+            self.crawler.do_action("turn left angle", steps, self.speed)
+            time.sleep(0.3)
+        self.heading = (self.heading - DEGREES_PER_TURN_STEP * steps) % 360
+
+    def turn_right_angle(self, steps: int = 5):
+        """Turn right with body tilting (angular turn)."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] turn_right_angle({steps})")
+        else:
+            self.crawler.do_action("turn right angle", steps, self.speed)
+            time.sleep(0.3)
+        self.heading = (self.heading + DEGREES_PER_TURN_STEP * steps) % 360
+
+    def nod(self, steps: int = 2):
+        """Nod head up and down."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] nod({steps})")
+        else:
+            for _ in range(steps):
+                self.crawler.do_action("look up", 1, self.speed)
+                time.sleep(0.2)
+                self.crawler.do_action("look down", 1, self.speed)
+                time.sleep(0.2)
+            self.crawler.do_action("stand", 1, self.speed)
+            time.sleep(0.3)
+
+    def shake_head(self, steps: int = 2):
+        """Shake head side to side."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] shake_head({steps})")
+        else:
+            for _ in range(steps):
+                self.crawler.do_action("look left", 1, self.speed)
+                time.sleep(0.2)
+                self.crawler.do_action("look right", 1, self.speed)
+                time.sleep(0.2)
+            self.crawler.do_action("stand", 1, self.speed)
+            time.sleep(0.3)
+
+    def shake_hand(self, steps: int = 2):
+        """Extend front leg for handshake."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] shake_hand({steps})")
+        else:
+            self.crawler.do_action("wave", steps, self.speed)
+            time.sleep(0.5)
+
+    def play_dead(self, steps: int = 1):
+        """Flip over and play dead."""
+        if MOCK_MODE:
+            logger.info(f"[MOCK] play_dead({steps})")
+        else:
+            self.crawler.do_step("sit", self.speed)
+            time.sleep(0.5)
+        self._standing = False
+
     def read_distance(self) -> float | None:
         """
         Read ultrasonic distance with median filter (from avoid.py pattern).
@@ -160,6 +279,7 @@ class CrawlerControl:
         blocked = dist <= OBSTACLE_THRESHOLD_CM
         if blocked:
             logger.info(f"Obstacle detected at {dist:.1f}cm")
+            speaker.announce_obstacle()
         return blocked
 
     def navigate_to(self, target_x: float, target_y: float) -> bool:
@@ -168,32 +288,51 @@ class CrawlerControl:
 
         Returns True if reached, False if blocked.
         """
+        result = self.navigate_to_interruptible(target_x, target_y)
+        return result["reached"]
+
+    def navigate_to_interruptible(
+        self,
+        target_x: float,
+        target_y: float,
+        check_interrupt_fn=None,
+    ) -> dict:
+        """
+        Navigate to target with obstacle avoidance and optional interrupt.
+
+        check_interrupt_fn: callable returning True to interrupt movement.
+
+        Returns: {"reached": bool, "interrupted": bool, "position": (x, y)}
+        """
         dx = target_x - self.x
         dy = target_y - self.y
         distance = math.sqrt(dx * dx + dy * dy)
 
         if distance < STEP_DISTANCE_CM:
-            return True
+            return {"reached": True, "interrupted": False, "position": (self.x, self.y)}
 
         # Calculate target heading (0° = positive Y, clockwise)
         target_heading = math.degrees(math.atan2(dx, dy)) % 360
-
-        # Turn to face target
         self._turn_to_heading(target_heading)
 
         # Walk forward step by step
         steps_needed = int(distance / STEP_DISTANCE_CM)
         for i in range(steps_needed):
+            # Check for interrupt between steps
+            if check_interrupt_fn and check_interrupt_fn():
+                logger.info(f"Navigation interrupted at step {i+1}/{steps_needed}")
+                return {"reached": False, "interrupted": True, "position": (self.x, self.y)}
+
             if self.check_obstacle():
                 logger.info(f"Obstacle at step {i+1}/{steps_needed}, attempting detour")
                 if not self._detour():
                     logger.warning("Detour failed, skipping waypoint")
-                    return False
+                    return {"reached": False, "interrupted": False, "position": (self.x, self.y)}
                 # Recalculate heading after detour
                 dx = target_x - self.x
                 dy = target_y - self.y
                 if math.sqrt(dx * dx + dy * dy) < STEP_DISTANCE_CM:
-                    return True
+                    return {"reached": True, "interrupted": False, "position": (self.x, self.y)}
                 target_heading = math.degrees(math.atan2(dx, dy)) % 360
                 self._turn_to_heading(target_heading)
 
@@ -201,7 +340,7 @@ class CrawlerControl:
 
         logger.info(f"Reached waypoint ({target_x:.1f}, {target_y:.1f}), "
                     f"actual pos ({self.x:.1f}, {self.y:.1f})")
-        return True
+        return {"reached": True, "interrupted": False, "position": (self.x, self.y)}
 
     def _turn_to_heading(self, target_heading: float):
         """Turn to face target heading using shortest rotation."""
