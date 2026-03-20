@@ -25,17 +25,17 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.types import (
     UnsupportedOperationError, JSONRPCResponse,
     ContentTypeNotSupportedError, InternalError,
-    AgentCapabilities, AgentCard, AgentSkill,
     Message, Role, Part, TextPart,
 )
 from a2a.utils import new_task
 from a2a.utils.errors import ServerError
 
-from agent_picrawler.config import AGENT_ID, AGENT_PORT, MOCK_MODE, STREAM_BASE_URL
+from agent_picrawler.config import AGENT_ID, AGENT_PORT, MOCK_MODE, STREAM_BASE_URL, ADS_ADDRESS, OASF_ADDRESS
 from agent_picrawler.capabilities import get_capabilities_json
 from agent_picrawler.hardware import CrawlerControl
 from agent_picrawler.brain import LLMClient
 from agent_picrawler.graph import MissionManager
+from agent_picrawler.card import AGENT_CARD, register_to_ads
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,43 +45,6 @@ logger = logging.getLogger(__name__)
 
 _start_time = time.time()
 _manager: MissionManager = None
-
-
-# ── Agent Card ──────────────────────────────────────────────
-
-AGENT_CARD = AgentCard(
-    name=f"Crawler Agent - {AGENT_ID}",
-    id=AGENT_ID,
-    description=(
-        "Autonomous PiCrawler robot agent. "
-        "Agent mode: LLM-driven decision making from Central's observations. "
-        "Execute mode: sequential direct_control actions. "
-        "GET /capabilities for supported actions and endpoints."
-    ),
-    url=f"http://0.0.0.0:{AGENT_PORT}",
-    version="3.0.0",
-    defaultInputModes=["text"],
-    defaultOutputModes=["text", "application/json"],
-    capabilities=AgentCapabilities(streaming=False),
-    skills=[AgentSkill(
-        id="ground_patrol",
-        name="Ground Patrol",
-        description=(
-            "Autonomous ground patrol robot. Two modes: "
-            "(1) Agent mode — receives observations from Central, LLM decides all actions; "
-            "(2) Execute mode — runs direct_control steps sequentially. "
-            "Supports: stand, sit, walk, turn, wave, dance, push-up, look around. "
-            "GET /capabilities for full action list and endpoints."
-        ),
-        tags=["crawler", "search", "ground", "patrol", "agent", "autonomous", "indoor"],
-        examples=[
-            "Detect faces, if found wave, otherwise sit",
-            "Patrol and find Alice",
-            "Stand up and dance",
-            "Wave",
-        ],
-    )],
-)
 
 
 # ── A2A Executor (router) ──────────────────────────────────
@@ -325,6 +288,10 @@ async def main():
     app.add_route("/observations", observations, methods=["POST"])
     app.add_route("/camera/frame", camera_frame, methods=["GET"])
     app.add_route("/voice/record", voice_record, methods=["POST"])
+
+    # ADS self-registration (non-blocking, failure is non-fatal)
+    if ADS_ADDRESS and OASF_ADDRESS:
+        register_to_ads(ADS_ADDRESS, OASF_ADDRESS)
 
     config = Config(app=app, host="0.0.0.0", port=AGENT_PORT, loop="asyncio")
     await Server(config).serve()
