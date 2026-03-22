@@ -73,11 +73,6 @@ def announce_mission_start(pattern: str = ""):
     say(f"Mission started. Pattern: {pattern}" if pattern else "Mission started.")
 
 
-def announce_detection(label: str = "object"):
-    """Announce a detection."""
-    play_sound("detection")
-    say(f"{label} detected.")
-
 
 def announce_mission_complete(detections: int = 0):
     """Announce mission complete."""

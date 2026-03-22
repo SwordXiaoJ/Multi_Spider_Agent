@@ -10,11 +10,11 @@ State persists across invocations via the MissionManager.
 """
 
 import asyncio
-import math
+import json
 import logging
 import time
 import traceback
-from typing import Dict, Any, Optional, List, TypedDict
+from typing import Dict, Optional, List, TypedDict
 from datetime import datetime
 
 import requests as http_requests
@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 
 AVAILABLE_ACTIONS = ACTION_NAMES + ["MISSION_COMPLETE"]
 SETUP_ACTIONS = {"stand_up", "sit_down", "stop"}
+# Navigation actions position the robot but don't fulfill the mission goal
+NAVIGATION_ACTIONS = {
+    "forward", "backward", "turn_left", "turn_right",
+    "turn_left_angle", "turn_right_angle",
+    "look_left", "look_right", "look_up", "look_down",
+}
+# Gesture actions that fulfill a mission goal (wave at apple, dance, etc.)
+GESTURE_ACTIONS = {
+    "wave", "dance", "push_up", "nod", "shake_head",
+    "shake_hand", "play_dead",
+}
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 
@@ -49,7 +60,6 @@ class MissionState(TypedDict):
     has_target: bool
     elapsed_s: float
     # Robot state
-    position: tuple            # (x, y, heading)
     standing: bool
     # Decision output
     obs_description: str
@@ -82,10 +92,10 @@ def _describe_bbox(bbox) -> str:
         return "unknown position"
     x_center = (x1 + x2) / 2
     box_height = y2 - y1
-    h_pos = "left side" if x_center < FRAME_WIDTH * 0.33 else (
-        "right side" if x_center > FRAME_WIDTH * 0.67 else "center")
+    h_pos = "left side" if x_center < FRAME_WIDTH * 0.25 else (
+        "right side" if x_center > FRAME_WIDTH * 0.75 else "center")
     distance = "very close" if box_height > FRAME_HEIGHT * 0.5 else (
-        "medium distance" if box_height > FRAME_HEIGHT * 0.2 else "far away")
+        "medium distance" if box_height > FRAME_HEIGHT * 0.15 else "far away")
     return f"{h_pos}, {distance}"
 
 
@@ -104,47 +114,60 @@ def _describe_detections(detections: list) -> str:
     return "\n".join(parts)
 
 
-# ── Search pattern generation (inlined) ─────────────────────
+# ── Target position estimation ─────────────────────────────
+# Pi Camera v2 horizontal FOV ≈ 62°
 
-def _generate_lawnmower(width_cm=60.0, height_cm=60.0, spacing_cm=30.0):
-    waypoints = []
-    for i in range(int(height_cm / spacing_cm) + 1):
-        y = min(i * spacing_cm, height_cm)
-        waypoints.append((width_cm if i % 2 == 0 else 0.0, y))
-    return waypoints
+CAMERA_H_FOV = 62.0
 
-
-def _generate_spiral(radius_cm=100.0, spacing_cm=30.0):
-    waypoints = []
-    for loop in range(1, int(radius_cm / spacing_cm) + 1):
-        r = spacing_cm * loop
-        for pt in range(12):
-            angle = 2 * math.pi * pt / 12
-            waypoints.append((r * math.cos(angle), r * math.sin(angle)))
-    return waypoints
+def _get_bbox_center_x(bbox) -> float | None:
+    """Get horizontal center of bbox in pixels."""
+    if isinstance(bbox, dict):
+        x1, x2 = bbox.get("x1", 0), bbox.get("x2", 0)
+    elif isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        x1, x2 = bbox[0], bbox[2]
+    else:
+        return None
+    return (x1 + x2) / 2
 
 
-def _generate_expanding_square(size_cm=200.0, spacing_cm=30.0):
-    waypoints = [(0.0, 0.0)]
-    dirs = [(1, 0), (0, 1), (-1, 0), (0, -1)]
-    x, y, step, half = 0.0, 0.0, 1, size_cm / 2
-    while step * spacing_cm <= size_cm:
-        for di in range(4):
-            dx, dy = dirs[di]
-            for _ in range(step if di < 2 else step + 1):
-                x += dx * spacing_cm
-                y += dy * spacing_cm
-                if abs(x) <= half and abs(y) <= half:
-                    waypoints.append((x, y))
-        step += 2
-    return waypoints
+def _get_target_horizontal_position(bbox) -> str:
+    """Determine if target is left, right, or center.
+    Uses wide center zone (25%-75%) so robot doesn't need to aim precisely."""
+    cx = _get_bbox_center_x(bbox)
+    if cx is None:
+        return "center"
+    if cx < FRAME_WIDTH * 0.25:
+        return "left"
+    elif cx > FRAME_WIDTH * 0.75:
+        return "right"
+    return "center"
 
 
-PATTERNS = {
-    "lawnmower": _generate_lawnmower,
-    "spiral": _generate_spiral,
-    "expanding_square": _generate_expanding_square,
-}
+def _estimate_turn_degrees(bbox) -> float:
+    """Estimate how many degrees to turn to center the target."""
+    cx = _get_bbox_center_x(bbox)
+    if cx is None:
+        return 15.0  # default guess
+    # Pixel offset from frame center
+    pixel_offset = abs(cx - FRAME_WIDTH / 2)
+    # Convert to degrees: pixels / half_width * half_FOV
+    degrees = pixel_offset / (FRAME_WIDTH / 2) * (CAMERA_H_FOV / 2)
+    return round(max(degrees, 5.0), 1)
+
+
+def _extract_gesture_from_goal(task_goal: str) -> str | None:
+    """
+    Extract gesture action keyword from task goal string.
+    e.g. "if detect an apple, wave" → "wave"
+         "find a person and dance" → "dance"
+    """
+    goal_lower = task_goal.lower()
+    for action in GESTURE_ACTIONS:
+        # Match action name with word boundaries (e.g. "wave" not "waved")
+        keyword = action.replace("_", " ")
+        if keyword in goal_lower or action in goal_lower:
+            return action
+    return None
 
 
 # ── Action execution ────────────────────────────────────────
@@ -157,10 +180,10 @@ def _build_action_map(control: CrawlerControl) -> dict:
         "stop": lambda: None,
         "forward": lambda: control.forward(3),
         "backward": lambda: control.backward(3),
-        "turn_left": lambda: control.turn_left(5),
-        "turn_right": lambda: control.turn_right(5),
-        "turn_left_angle": lambda: control.turn_left_angle(5),
-        "turn_right_angle": lambda: control.turn_right_angle(5),
+        "turn_left": lambda: control.turn_left(2),       # ~76° (38°/step)
+        "turn_right": lambda: control.turn_right(2),     # ~76° (38°/step)
+        "turn_left_angle": lambda: control.turn_left_angle(2),   # ~26° (angle=30 default)
+        "turn_right_angle": lambda: control.turn_right_angle(2), # ~26° (angle=30 default)
         "wave": lambda: control.wave(2),
         "dance": lambda: control.dance(1),
         "push_up": lambda: control.push_up(2),
@@ -240,7 +263,6 @@ class MissionGraph:
         decision = self.llm.decide_observation_response(
             task_goal=state["task_goal"],
             observations=state["obs_description"],
-            position=state["position"],
             elapsed_s=state.get("elapsed_s", 0),
             available_actions=AVAILABLE_ACTIONS,
             actions_description=get_actions_description(),
@@ -280,13 +302,16 @@ class MissionGraph:
         if obs_status == "finished":
             return {"outcome": "completed"}
 
-        is_response = action not in SETUP_ACTIONS
-        if has_target and is_response:
-            return {"outcome": "acted"}
+        # Only gesture/response actions (wave, dance, etc.) complete the mission
+        # Navigation actions (turn, forward, look) are just positioning
+        if action in SETUP_ACTIONS or action in NAVIGATION_ACTIONS:
+            if has_target:
+                logger.info(f"Positioning action '{action}' with target — waiting for next observation")
+            return {"outcome": "setup" if has_target else "ignored"}
 
-        if has_target and not is_response:
-            logger.info(f"Setup action '{action}' with target — waiting for next observation")
-            return {"outcome": "setup"}
+        # Gesture/response action with target = mission fulfilled
+        if has_target:
+            return {"outcome": "acted"}
 
         return {"outcome": "ignored"}
 
@@ -315,6 +340,7 @@ class MissionManager:
         self.task_goal: str | None = None
         self.callback_url: str | None = None
         self.mission_active = False
+        self.report_all = False  # True = report task (don't interrupt patrol)
 
         # Throttle
         self._last_decision_time = 0.0
@@ -327,21 +353,30 @@ class MissionManager:
 
         # Patrol
         self._stop_requested = False
+        self._patrol_active = False
+
+        # Track completed missions to prevent re-activation
+        self._completed_mission_ids: set = set()
+
+        # Track consecutive turns to detect oscillation
+        self._consecutive_turns = 0
 
     # ── Mission lifecycle ────────────────────────────────────
 
-    def set_mission(self, mission_id: str, task_goal: str, callback_url: str = ""):
+    def set_mission(self, mission_id: str, task_goal: str, callback_url: str = "", report_all: bool = False):
         self.mission_id = mission_id
         self.task_goal = task_goal
         self.callback_url = callback_url
         self.mission_active = True
-        logger.info(f"Mission set: id={mission_id}, goal={task_goal}")
+        self.report_all = report_all
+        logger.info(f"Mission set: id={mission_id}, goal={task_goal}, report_all={report_all}")
 
     def clear_mission(self):
         self.mission_id = None
         self.task_goal = None
         self.callback_url = None
         self.mission_active = False
+        self.report_all = False
         logger.info("Mission cleared")
 
     # ── Agent mode: initial actions ──────────────────────────
@@ -372,6 +407,9 @@ class MissionManager:
             mid = data.get("mission_id")
             goal = data.get("task_goal")
             cb = data.get("callback_url", "")
+            if mid and mid in self._completed_mission_ids:
+                logger.info(f"Ignoring observation for already-completed mission: {mid}")
+                return {"status": "ignored", "reason": "mission already completed"}
             if mid and goal:
                 logger.info(f"Auto-activating mission: {mid}")
                 self.set_mission(mid, goal, cb)
@@ -394,6 +432,12 @@ class MissionManager:
         if obs_status == "searching" and not has_target and not report_all:
             return {"status": "ignored", "reason": "no target detected"}
 
+        # Report task: just log detections, no LLM needed, patrol continues
+        if self.report_all and obs_status == "searching":
+            labels = [d.get("label", "?") for d in detections]
+            logger.info(f"Report task: detected {labels}, patrol continues")
+            return {"status": "ok", "action_taken": "stop", "reason": f"logged: {labels}"}
+
         # Throttle (except "finished")
         now = time.time()
         if obs_status != "finished" and now - self._last_decision_time < self._min_decision_interval:
@@ -403,6 +447,15 @@ class MissionManager:
         self._last_decision_time = now
 
         try:
+            # ── Action task with target during patrol ──
+            if has_target and not self.report_all and self._patrol_active:
+                return await self._handle_target_during_patrol(data, detections)
+
+            # ── Action task with target (no patrol running) — LLM decides ──
+            if has_target and not self.report_all:
+                logger.info("Target found — LLM deciding action...")
+                return await self._llm_decide_and_execute(data, detections)
+
             state = self._build_state(
                 obs_status=obs_status,
                 obs_reason=data.get("reason", ""),
@@ -419,11 +472,15 @@ class MissionManager:
             outcome = result.get("outcome", "ignored")
 
             if outcome == "completed" or outcome == "acted":
-                if obs_status != "finished":
-                    await self._notify_complete()
+                if self.report_all:
+                    logger.info(f"Report task: detection logged, patrol continues")
+                    return {"status": "ok", "action_taken": "stop", "reason": reason}
                 else:
-                    self.clear_mission()
-                return {"status": "ok", "action_taken": action, "reason": reason, "mission_ended": True}
+                    if obs_status != "finished":
+                        await self._notify_complete()
+                    else:
+                        self.clear_mission()
+                    return {"status": "ok", "action_taken": action, "reason": reason, "mission_ended": True}
 
             if outcome == "setup":
                 return {"status": "ok", "action_taken": action, "reason": reason}
@@ -439,6 +496,129 @@ class MissionManager:
             return {"status": "error", "reason": str(e)}
         finally:
             self._processing = False
+
+    async def _handle_target_during_patrol(self, data: dict, detections: list) -> dict:
+        """
+        Handle target detection while patrol is running.
+        Stops patrol and lets LLM take over via normal observation flow.
+        """
+        logger.info("Target detected during patrol — stopping patrol, LLM takes over")
+        self._consecutive_turns = 0
+        self.stop_patrol()
+        for _ in range(30):  # wait up to 3s for patrol to stop
+            if not self._patrol_active:
+                break
+            await asyncio.sleep(0.1)
+
+        # Fall through to normal LLM decision path
+        return await self._llm_decide_and_execute(data, detections)
+
+    async def _llm_decide_and_execute(self, data: dict, detections: list) -> dict:
+        """
+        Ask LLM to decide next action for target interaction.
+
+        LLM sees target position (left/right/center) and distance (far/close),
+        then decides: turn toward it, move closer, or execute response gesture.
+        """
+        task_goal = data.get("task_goal", self.task_goal or "")
+        obs_desc = _describe_detections(
+            [d for d in detections if d.get("is_target")] or detections
+        )
+
+        # Add ultrasonic distance reading
+        ultrasonic_cm = self.control.read_distance()
+        if ultrasonic_cm is not None:
+            obs_desc += f"\n\nUltrasonic sensor: obstacle/object at {ultrasonic_cm:.0f}cm ahead"
+        else:
+            obs_desc += "\n\nUltrasonic sensor: no reading"
+
+        # After too many turns, hint LLM to stop turning and act
+        if self._consecutive_turns >= 3:
+            obs_desc += (
+                "\n\nIMPORTANT: You have already turned multiple times. "
+                "The target is approximately in front of you. "
+                "Do NOT turn again. Either move forward to approach, "
+                "or execute the response gesture (e.g. wave) now."
+            )
+
+        # Ask LLM (up to 2 attempts, guard against stand_up when standing)
+        for attempt in range(2):
+            decision = await asyncio.to_thread(
+                self.llm.decide_observation_response,
+                task_goal=task_goal,
+                observations=obs_desc,
+                elapsed_s=data.get("elapsed_s", 0),
+                available_actions=AVAILABLE_ACTIONS,
+                actions_description=get_actions_description(),
+                robot_state=f"standing={self.control._standing}",
+            )
+            action = decision.get("action", "stop")
+            reason = decision.get("reason", "")
+            logger.info(f"LLM decision (attempt {attempt+1}): {action} — {reason}")
+
+            if action == "stand_up" and self.control._standing:
+                logger.info("LLM said stand_up but already standing — retrying")
+                continue
+            break
+
+        # Gesture action → execute and complete mission
+        if action in GESTURE_ACTIONS or action == "MISSION_COMPLETE":
+            self._consecutive_turns = 0
+            if action != "MISSION_COMPLETE":
+                handler = self.action_map.get(action)
+                if handler:
+                    await asyncio.to_thread(handler)
+                    speaker.say(action.replace("_", " "))
+            speaker.say("Mission complete")
+            await self._notify_complete()
+            return {"status": "ok", "action_taken": action, "reason": reason, "mission_ended": True}
+
+        # Turn action → use bbox to calculate precise angle
+        if action in ("turn_left", "turn_right", "turn_left_angle", "turn_right_angle"):
+            self._consecutive_turns += 1
+            target_dets = [d for d in detections if d.get("is_target")]
+            bbox = target_dets[0].get("bbox", {}) if target_dets else {}
+            turn_degrees = _estimate_turn_degrees(bbox)
+            direction = "left" if "left" in action else "right"
+            logger.info(f"LLM said {action} — turning {direction} ~{turn_degrees}° (from bbox) [turn #{self._consecutive_turns}]")
+            await asyncio.to_thread(self._turn_by_degrees, direction, turn_degrees)
+            return {"status": "ok", "action_taken": action, "reason": f"turned {direction} ~{turn_degrees}°"}
+
+        # Other navigation (forward, backward, etc.) → execute directly
+        if action in NAVIGATION_ACTIONS:
+            self._consecutive_turns = 0
+            handler = self.action_map.get(action)
+            if handler:
+                logger.info(f"Executing navigation: {action}")
+                await asyncio.to_thread(handler)
+            return {"status": "ok", "action_taken": action, "reason": reason}
+
+        # stand_up — execute it so _standing becomes True, then wait
+        if action == "stand_up":
+            logger.info("Executing stand_up, then waiting for next observation")
+            await asyncio.to_thread(self.control.stand)
+            return {"status": "ok", "action_taken": action, "reason": reason}
+
+        # LLM returned stop or other — wait for next observation
+        logger.info(f"LLM suggested '{action}' — waiting for next observation")
+        return {"status": "ok", "action_taken": action, "reason": reason}
+
+    def _turn_by_degrees(self, direction: str, degrees: float):
+        """Turn by estimated degrees using turn_left_angle/turn_right_angle.
+        Calibration: actual turn ≈ angle_param × 0.55 per step.
+        (tuned down from 0.44 to reduce overshoot)"""
+        if degrees <= 45:
+            angle_param = int(degrees / 0.55)
+            steps = 1
+        else:
+            angle_param = int(degrees / 0.55 / 2)
+            steps = 2
+        angle_param = max(10, min(angle_param, 90))
+
+        if direction == "left":
+            self.control.turn_left_angle(steps, angle=angle_param)
+        else:
+            self.control.turn_right_angle(steps, angle=angle_param)
 
     # ── Execute mode: direct control ─────────────────────────
 
@@ -471,17 +651,12 @@ class MissionManager:
             if action not in ("sit_down", "stop"):
                 self._schedule_auto_sit()
 
-        x, y, heading = self.control.get_position()
         summaries = [f"{r['step']}. {r['description']}: {r['status']}" for r in results]
 
         return {
             "agent_id": AGENT_ID,
             "detections": [],
-            "area_covered_pct": 0.0,
             "mission_time_ms": total_time,
-            "search_pattern": "none",
-            "waypoints_completed": 0,
-            "waypoints_total": 0,
             "summary": f"Executed {len(steps)} steps:\n" + "\n".join(summaries),
             "mission_status": "completed" if all(r["status"] == "completed" for r in results) else "partial",
         }
@@ -491,52 +666,126 @@ class MissionManager:
     def stop_patrol(self):
         self._stop_requested = True
 
-    async def patrol(self, search_pattern: str = "lawnmower") -> dict:
-        """Patrol along waypoints. Detection is handled by Central."""
+    async def patrol(self) -> dict:
+        """Patrol a fixed route with LLM-assisted obstacle avoidance.
+        Detection is handled by Central; obstacle avoidance asks LLM."""
         self._stop_requested = False
-        gen = PATTERNS.get(search_pattern, _generate_lawnmower)
-        waypoints = gen(width_cm=60, height_cm=60, spacing_cm=30)
-        total = len(waypoints)
+        self._patrol_active = True
         start = datetime.utcnow()
 
-        logger.info(f"Patrol: pattern={search_pattern}, waypoints={total}")
-        speaker.announce_mission_start(search_pattern)
-
-        self.control.stand()
-        self.control.reset_position()
-        completed = 0
+        logger.info("Patrol: fixed route mode")
+        speaker.announce_mission_start("patrol")
 
         try:
-            for i, (tx, ty) in enumerate(waypoints):
+            if not self.control._standing:
+                await asyncio.to_thread(self.control.stand)
+
+            route = self.control.PATROL_ROUTE
+            logger.info(f"patrol: started, {len(route)} steps")
+
+            for i, (action, count) in enumerate(route):
                 if self._stop_requested:
-                    logger.info("Patrol stopped")
+                    logger.info(f"patrol: aborted at step {i+1}")
                     break
-                logger.info(f"Waypoint {i+1}/{total}: ({tx:.1f}, {ty:.1f})")
-                self.control.navigate_to(tx, ty)
-                completed = i + 1
+
+                logger.info(f"patrol: step {i+1}/{len(route)} — {action}({count})")
+
+                if action == "forward":
+                    await self._patrol_forward(count)
+                elif action == "backward":
+                    await asyncio.to_thread(self.control.backward, count)
+                elif action == "turn_left":
+                    await asyncio.to_thread(self.control.turn_left_angle, 2, count)
+                elif action == "turn_right":
+                    await asyncio.to_thread(self.control.turn_right_angle, 2, count)
+
+            if not self._stop_requested:
+                logger.info("patrol: route completed")
         finally:
-            self.control.sit()
+            self._patrol_active = False
+            # Only sit down if patrol finished normally (not interrupted for target)
+            if not self._stop_requested:
+                self.control.sit()
 
         elapsed = int((datetime.utcnow() - start).total_seconds() * 1000)
-        coverage = (completed / max(total, 1)) * 100
         speaker.announce_mission_complete(0)
+
+        # Report task: route finished, notify Central
+        if self.report_all and self.mission_active:
+            await self._notify_complete()
 
         return {
             "agent_id": AGENT_ID,
             "detections": [],
-            "area_covered_pct": coverage,
             "mission_time_ms": elapsed,
-            "search_pattern": search_pattern,
-            "waypoints_completed": completed,
-            "waypoints_total": total,
-            "summary": f"Patrol {search_pattern}: {completed}/{total}, {coverage:.0f}%",
-            "mission_status": "completed" if completed == total else "partial",
+            "summary": f"Patrol completed ({elapsed // 1000}s)",
+            "mission_status": "completed",
         }
+
+    async def _patrol_forward(self, steps: int):
+        """Walk forward N steps with LLM-assisted obstacle avoidance."""
+        walked = 0
+        while walked < steps:
+            if self._stop_requested:
+                return
+
+            obstacle = await asyncio.to_thread(self.control.check_obstacle)
+            if obstacle:
+                if self._stop_requested:
+                    logger.info("patrol: obstacle detected but stop requested (target found), skipping avoidance")
+                    return
+                dist = await asyncio.to_thread(self.control.read_distance)
+                dist_cm = dist if dist is not None else 0
+                logger.info(f"patrol: obstacle at {dist_cm:.0f}cm, step {walked+1}/{steps} — asking LLM")
+                await self._llm_decide_obstacle(dist_cm)
+                if self._stop_requested:
+                    return
+                # After LLM avoidance action, re-check before continuing
+            else:
+                await asyncio.to_thread(self.control.forward, 1)
+                walked += 1
+
+    async def _llm_decide_obstacle(self, distance_cm: float):
+        """Ask LLM how to handle an obstacle during patrol."""
+        system = (
+            "You are a PiCrawler robot patrolling an area. "
+            "An obstacle has been detected ahead by the ultrasonic sensor.\n\n"
+            "You must choose ONE avoidance action:\n"
+            "- backward: back up a few steps\n"
+            "- turn_left: turn left to go around the obstacle\n"
+            "- turn_right: turn right to go around the obstacle\n"
+            "- stop: stop and wait\n\n"
+            "Consider the distance. If very close (<10cm), back up first. "
+            "Otherwise, turn to go around it.\n\n"
+            "Return JSON: {\"action\": \"...\", \"reason\": \"brief explanation\"}\n"
+            "Only return valid JSON."
+        )
+        user = f"Obstacle detected at {distance_cm:.0f}cm ahead. What should I do?"
+
+        result = await asyncio.to_thread(self.llm._call, system, user)
+        try:
+            parsed = json.loads(result)
+        except (json.JSONDecodeError, Exception):
+            parsed = {"action": "turn_left", "reason": "parse error, default avoidance"}
+
+        action = parsed.get("action", "turn_left")
+        reason = parsed.get("reason", "")
+        logger.info(f"LLM obstacle decision: {action} — {reason}")
+
+        if action == "backward":
+            await asyncio.to_thread(self.control.backward, 2)
+        elif action == "turn_left":
+            await asyncio.to_thread(self.control.turn_left_angle, 2, 45)
+            await asyncio.to_thread(self.control.forward, 2)
+        elif action == "turn_right":
+            await asyncio.to_thread(self.control.turn_right_angle, 2, 45)
+            await asyncio.to_thread(self.control.forward, 2)
+        else:
+            await asyncio.to_thread(self.control.backward, 1)
 
     # ── Helpers ──────────────────────────────────────────────
 
     def _build_state(self, obs_status="searching", **kwargs) -> MissionState:
-        x, y, heading = self.control.get_position()
         return {
             "task_goal": kwargs.get("task_goal", self.task_goal or ""),
             "mission_id": self.mission_id or "",
@@ -546,7 +795,6 @@ class MissionManager:
             "detections": kwargs.get("detections", []),
             "has_target": kwargs.get("has_target", False),
             "elapsed_s": kwargs.get("elapsed_s", 0),
-            "position": (x, y, heading),
             "standing": self.control._standing,
             "obs_description": "",
             "action": "",
@@ -555,6 +803,9 @@ class MissionManager:
         }
 
     async def _notify_complete(self):
+        # Record completed mission to prevent re-activation
+        if self.mission_id:
+            self._completed_mission_ids.add(self.mission_id)
         if not self.callback_url:
             self.clear_mission()
             return

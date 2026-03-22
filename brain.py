@@ -72,7 +72,7 @@ class LLMClient:
             },
             json={
                 "model": self.model,
-                "max_tokens": 1024,
+                "max_completion_tokens": 1024,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -104,109 +104,10 @@ class LLMClient:
         data = resp.json()
         return data["content"][0]["text"]
 
-    def parse_mission(self, command: str) -> dict:
-        """
-        Parse natural language mission command into structured params.
-
-        Returns: {"pattern": "lawnmower", "target": "person", "width_cm": 200, ...}
-        """
-        system = (
-            "You are a ground patrol robot agent. Parse the mission command into JSON.\n"
-            "Return JSON with fields: pattern (lawnmower/spiral/expanding_square), "
-            "target (what to look for), width_cm, height_cm, spacing_cm.\n"
-            "Use reasonable defaults: width_cm=60, height_cm=60, spacing_cm=30.\n"
-            "Only return valid JSON, no other text."
-        )
-        result = self._call(system, command)
-
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse LLM response as JSON: {result}")
-            return {
-                "pattern": "lawnmower",
-                "target": "any",
-                "width_cm": 60,
-                "height_cm": 60,
-                "spacing_cm": 30,
-            }
-
-    def evaluate_detection(self, target: str, detection: dict) -> dict:
-        """
-        Judge whether a detection matches the mission target.
-
-        Returns: {"match": True/False, "confidence": 0.0-1.0, "reason": "..."}
-        """
-        system = (
-            "You are a ground patrol robot. Evaluate whether the detection matches the target.\n"
-            "Return JSON: {\"match\": bool, \"confidence\": float, \"reason\": \"...\"}\n"
-            "Only return valid JSON."
-        )
-        user = f"Target: {target}\nDetection: {json.dumps(detection)}"
-        result = self._call(system, user)
-
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            return {"match": False, "confidence": 0.0, "reason": "parse error"}
-
-    def decide_action(self, situation: str, options: list) -> dict:
-        """
-        Decide what action to take in a complex situation.
-
-        Returns: {"action": "...", "reason": "..."}
-        """
-        system = (
-            "You are a ground patrol robot. Given a situation, choose the best action.\n"
-            "Return JSON: {\"action\": \"chosen_option\", \"reason\": \"...\"}\n"
-            "Only return valid JSON."
-        )
-        user = f"Situation: {situation}\nOptions: {json.dumps(options)}"
-        result = self._call(system, user)
-
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            return {"action": options[0] if options else "wait", "reason": "parse error"}
-
-    def decide_detection_response(
-        self, detection_status: dict, position: tuple, mission_context: str
-    ) -> dict:
-        """
-        Decide how to respond to a mid-patrol detection event.
-
-        Returns: {"action": "ignore|approach|report", "reason": "..."}
-        """
-        system = (
-            "You are a ground patrol robot. A detection occurred while you were moving.\n"
-            "Given the detection data, your position, and mission context, choose one action:\n"
-            "- ignore: false positive or irrelevant to mission target\n"
-            "- approach: move closer for better identification\n"
-            "- report: important finding, log it and continue patrol\n"
-            "Return JSON: {\"action\": \"...\", \"reason\": \"...\"}\n"
-            "Only return valid JSON."
-        )
-        x, y, heading = position
-        user = (
-            f"Detection: {json.dumps(detection_status)}\n"
-            f"Position: ({x:.1f}, {y:.1f}), heading: {heading:.1f}°\n"
-            f"Mission: {mission_context}"
-        )
-        result = self._call(system, user)
-
-        try:
-            parsed = json.loads(result)
-            if parsed.get("action") not in ("ignore", "approach", "report"):
-                parsed["action"] = "approach"
-            return parsed
-        except json.JSONDecodeError:
-            return {"action": "approach", "reason": "parse error, defaulting to approach"}
-
     def decide_observation_response(
         self,
         task_goal: str,
         observations: str,
-        position: tuple,
         elapsed_s: float,
         available_actions: list,
         actions_description: str = "",
@@ -231,16 +132,20 @@ class LLMClient:
             "- You must stand_up before you can move or perform gestures\n"
             "- If a [TARGET] is on the left, turn_left to face it\n"
             "- If a [TARGET] is on the right, turn_right to face it\n"
-            "- If a [TARGET] is at center and far, move forward\n"
-            "- If a [TARGET] is at center and close, execute the response action "
-            "specified in the task goal (e.g. wave, dance, sit_down)\n"
+            "- If a [TARGET] is at center and far, move forward to approach\n"
+            "- If a [TARGET] is at center and close (or ultrasonic ≤ 30cm), "
+            "execute the response action specified in the task goal (e.g. wave, dance, sit_down)\n"
+            "- Ultrasonic sensor measures distance to nearest object ahead (in cm). "
+            "Use it together with bbox size to judge distance. ≤30cm = close, >30cm = far\n"
             "- look_left/look_right only tilts the body, does NOT change facing direction\n"
             "- turn_left/turn_right changes facing direction (~90 degrees)\n"
-            "- If the task goal is fully accomplished, output MISSION_COMPLETE\n"
-            "- IMPORTANT: If the task goal only asks to 'detect', 'report', 'observe', "
-            "'identify', or 'describe' (no physical action like wave/dance/sit), "
-            "output MISSION_COMPLETE immediately after seeing the detections. "
-            "Do NOT perform any physical action — reporting is automatic.\n"
+            "- IMPORTANT: There are two types of tasks:\n"
+            "  1) REPORT tasks ('report', 'detect', 'observe', 'identify', 'describe'): "
+            "Do NOT output MISSION_COMPLETE. Just output 'stop' and let the patrol continue. "
+            "Reporting is automatic — the system records all detections along the route.\n"
+            "  2) ACTION tasks ('if found X, wave/dance/sit_down', etc.): "
+            "When the [TARGET] is found and close, execute the specified action, "
+            "then output MISSION_COMPLETE to stop the patrol.\n"
             "- Only perform physical actions (wave, dance, sit_down, etc.) if the task goal "
             "explicitly asks for them.\n"
             "- If you are already standing (standing=True), do NOT choose stand_up again\n"
@@ -248,10 +153,8 @@ class LLMClient:
             "Return JSON: {\"action\": \"...\", \"reason\": \"brief explanation\"}\n"
             "Only return valid JSON."
         )
-        x, y, heading = position
         user = (
             f"Mission goal: {task_goal}\n"
-            f"My position: ({x:.1f}, {y:.1f}) cm, heading: {heading:.1f}°\n"
             f"Current state: {robot_state}\n"
             f"Time elapsed: {elapsed_s:.0f}s\n\n"
             f"Observations:\n{observations}\n\n"
@@ -269,12 +172,3 @@ class LLMClient:
         except json.JSONDecodeError:
             return {"action": "stop", "reason": "LLM parse error"}
 
-    def summarize_mission(self, detections: list, stats: dict) -> str:
-        """Generate a natural language mission summary."""
-        system = (
-            "You are a ground patrol robot. Summarize the mission results in 2-3 sentences.\n"
-            "Include: area covered, objects found, key observations."
-        )
-        user = f"Detections: {json.dumps(detections)}\nStats: {json.dumps(stats)}"
-        result = self._call(system, user)
-        return result

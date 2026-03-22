@@ -113,22 +113,27 @@ class CrawlerAgentExecutor(AgentExecutor):
         mission_id = metadata.get("mission_id", "")
         task_goal = metadata.get("task_goal", "")
         callback_url = metadata.get("callback_url", "")
-        steps = metadata.get("steps", [])
+
+        report_all = metadata.get("report_all", False)
 
         if mission_id and task_goal:
-            self.manager.set_mission(mission_id, task_goal, callback_url)
-            logger.info(f"Agent mode: mission={mission_id}, goal={task_goal}")
+            self.manager.set_mission(mission_id, task_goal, callback_url, report_all=report_all)
+            logger.info(f"Agent mode: mission={mission_id}, goal={task_goal}, report_all={report_all}")
 
         await self.manager.decide_initial_actions()
 
-        # If search step, start patrol
-        search_step = next((s for s in steps if s.get("task_type") == "search"), None)
-        if search_step:
+        # Start patrol if search_pattern is specified or steps contain search
+        logger.info(f"Agent mode metadata: {metadata}")
+        should_patrol = bool(metadata.get("search_pattern"))
+        if not should_patrol:
+            steps = metadata.get("steps", [])
+            should_patrol = any(s.get("task_type") == "search" for s in steps)
+
+        if should_patrol:
             self.busy = True
             self.current_task = "patrol"
             try:
-                pattern = search_step.get("search_pattern", "lawnmower")
-                self._current_future = asyncio.ensure_future(self.manager.patrol(pattern))
+                self._current_future = asyncio.ensure_future(self.manager.patrol())
                 return await self._current_future
             finally:
                 self.busy = False
@@ -140,11 +145,7 @@ class CrawlerAgentExecutor(AgentExecutor):
             "request_id": message.message_id,
             "agent_id": AGENT_ID,
             "detections": [],
-            "area_covered_pct": 0.0,
             "mission_time_ms": 0,
-            "search_pattern": "none",
-            "waypoints_completed": 0,
-            "waypoints_total": 0,
             "summary": "Mission registered. Waiting for observations.",
             "mission_status": "awaiting_observations",
         }
@@ -174,7 +175,6 @@ class CrawlerAgentExecutor(AgentExecutor):
         lines = [
             f"Agent: {result.get('agent_id', AGENT_ID)}",
             f"Detections: {len(result.get('detections', []))}",
-            f"Coverage: {result.get('area_covered_pct', 0):.1f}%",
             f"Time: {result.get('mission_time_ms', 0)}ms",
             f"Status: {result.get('mission_status', 'unknown')}",
         ]

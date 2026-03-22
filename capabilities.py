@@ -8,7 +8,7 @@ Every part of the system reads from here:
 - brain.py: includes action descriptions in LLM prompts
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
 
@@ -60,27 +60,27 @@ ACTIONS: List[Action] = [
     ),
     Action(
         name="turn_left",
-        description="Turn left ~90 degrees (stays in place, does not move forward).",
+        description="Turn left ~80 degrees (stays in place, does not move forward).",
         category="movement",
-        parameters="5 turn steps, ~18 degrees each",
+        parameters="2 turn steps, ~38 degrees each",
     ),
     Action(
         name="turn_right",
-        description="Turn right ~90 degrees (stays in place, does not move forward).",
+        description="Turn right ~80 degrees (stays in place, does not move forward).",
         category="movement",
-        parameters="5 turn steps, ~18 degrees each",
+        parameters="2 turn steps, ~38 degrees each",
     ),
     Action(
         name="turn_left_angle",
         description="Turn left with body tilting (angular turn, more expressive than normal turn).",
         category="movement",
-        parameters="5 turn steps",
+        parameters="2 turn steps, ~40 degrees each (angle=90), ~13 degrees each (angle=30 default)",
     ),
     Action(
         name="turn_right_angle",
         description="Turn right with body tilting (angular turn, more expressive than normal turn).",
         category="movement",
-        parameters="5 turn steps",
+        parameters="2 turn steps, ~40 degrees each (angle=90), ~13 degrees each (angle=30 default)",
     ),
 
     # Gestures
@@ -144,9 +144,6 @@ ACTIONS: List[Action] = [
     ),
 ]
 
-# Lookup by name
-ACTIONS_BY_NAME = {a.name: a for a in ACTIONS}
-
 # Just the names (for quick access)
 ACTION_NAMES = [a.name for a in ACTIONS]
 
@@ -159,14 +156,10 @@ SENSORS = [
 ]
 
 ABILITIES = [
-    {"name": "navigation", "description": "Autonomous waypoint navigation with dead-reckoning position tracking"},
-    {"name": "obstacle_avoidance", "description": "Ultrasonic-based obstacle detection and detour maneuver"},
-    {"name": "position_tracking", "description": "Dead-reckoning position tracking (x_cm, y_cm, heading_deg)"},
+    {"name": "obstacle_avoidance", "description": "Reactive ultrasonic obstacle avoidance during walking"},
     {"name": "tts", "description": "Text-to-speech via local TTS engine (configurable, default off)"},
     {"name": "sound_effects", "description": "Play sound effects: mission_start, detection, mission_complete, error, obstacle, alert"},
 ]
-
-SEARCH_PATTERNS = ["lawnmower", "spiral", "expanding_square"]
 
 ENDPOINTS = {
     "observations": "/observations",
@@ -212,7 +205,6 @@ def get_capabilities_json() -> dict:
         ],
         "sensors": SENSORS,
         "abilities": ABILITIES,
-        "search_patterns": SEARCH_PATTERNS,
         "endpoints": ENDPOINTS,
         "modes": {
             "agent": {

@@ -1,19 +1,17 @@
 """
-Hardware driver: PiCrawler servo control with dead-reckoning position tracking.
+Hardware driver: PiCrawler servo control with ultrasonic obstacle avoidance.
 
 Talks directly to PiCrawler servos and ultrasonic sensor.
 MOCK_MODE (default): only logs actions, no hardware movement.
 Set MOCK_MODE=false to drive the real robot.
 """
 
-import math
 import time
 import signal
 import logging
 
 from agent_picrawler.config import (
-    MOCK_MODE, STEP_DISTANCE_CM, DEGREES_PER_TURN_STEP,
-    OBSTACLE_THRESHOLD_CM, PATROL_SPEED,
+    MOCK_MODE, OBSTACLE_THRESHOLD_CM, PATROL_SPEED,
 )
 from agent_picrawler import speaker
 
@@ -35,17 +33,11 @@ def _alarm_handler(signum, frame):
 
 class CrawlerControl:
     """
-    Controls PiCrawler movement and tracks position via dead reckoning.
-
-    Position is tracked in centimeters from the starting point.
-    heading: degrees, 0 = positive Y axis (forward at start), clockwise.
+    Controls PiCrawler movement with ultrasonic obstacle avoidance.
     """
 
     def __init__(self, speed: int = PATROL_SPEED):
         self.speed = speed
-        self.x = 0.0
-        self.y = 0.0
-        self.heading = 0.0  # degrees, 0 = forward (positive Y)
         self._standing = False
 
         if MOCK_MODE:
@@ -77,7 +69,7 @@ class CrawlerControl:
         self._standing = False
 
     def forward(self, steps: int = 1):
-        """Move forward N steps, updating position."""
+        """Move forward N steps."""
         for i in range(steps):
             if MOCK_MODE:
                 logger.info(f"[MOCK] forward step {i+1}/{steps}")
@@ -85,14 +77,8 @@ class CrawlerControl:
                 self.crawler.do_action("forward", 1, self.speed)
                 time.sleep(0.3)
 
-            rad = math.radians(self.heading)
-            self.x += math.sin(rad) * STEP_DISTANCE_CM
-            self.y += math.cos(rad) * STEP_DISTANCE_CM
-
-        logger.debug(f"Position after forward({steps}): ({self.x:.1f}, {self.y:.1f})")
-
     def backward(self, steps: int = 1):
-        """Move backward N steps, updating position."""
+        """Move backward N steps."""
         for i in range(steps):
             if MOCK_MODE:
                 logger.info(f"[MOCK] backward step {i+1}/{steps}")
@@ -100,31 +86,21 @@ class CrawlerControl:
                 self.crawler.do_action("backward", 1, self.speed)
                 time.sleep(0.3)
 
-            rad = math.radians(self.heading)
-            self.x -= math.sin(rad) * STEP_DISTANCE_CM
-            self.y -= math.cos(rad) * STEP_DISTANCE_CM
-
     def turn_left(self, steps: int = 1):
-        """Turn left N steps, updating heading."""
+        """Turn left N steps."""
         if MOCK_MODE:
             logger.info(f"[MOCK] turn_left({steps})")
         else:
             self.crawler.do_action("turn left", steps, self.speed)
             time.sleep(0.3)
 
-        self.heading = (self.heading - DEGREES_PER_TURN_STEP * steps) % 360
-        logger.debug(f"Heading after turn_left({steps}): {self.heading:.1f}°")
-
     def turn_right(self, steps: int = 1):
-        """Turn right N steps, updating heading."""
+        """Turn right N steps."""
         if MOCK_MODE:
             logger.info(f"[MOCK] turn_right({steps})")
         else:
             self.crawler.do_action("turn right", steps, self.speed)
             time.sleep(0.3)
-
-        self.heading = (self.heading + DEGREES_PER_TURN_STEP * steps) % 360
-        logger.debug(f"Heading after turn_right({steps}): {self.heading:.1f}°")
 
     def push_up(self, steps: int = 1):
         """Do push-ups."""
@@ -182,23 +158,23 @@ class CrawlerControl:
             self.crawler.do_action("dance", steps, self.speed)
             time.sleep(0.5)
 
-    def turn_left_angle(self, steps: int = 5):
-        """Turn left with body tilting (angular turn)."""
+    def turn_left_angle(self, steps: int = 1, angle: int = 30):
+        """Turn left. angle is the leg swing parameter, actual turn ≈ angle × 0.44 per step."""
         if MOCK_MODE:
-            logger.info(f"[MOCK] turn_left_angle({steps})")
+            logger.info(f"[MOCK] turn_left_angle({steps}, angle={angle})")
         else:
+            self.crawler.angle = angle
             self.crawler.do_action("turn left angle", steps, self.speed)
             time.sleep(0.3)
-        self.heading = (self.heading - DEGREES_PER_TURN_STEP * steps) % 360
 
-    def turn_right_angle(self, steps: int = 5):
-        """Turn right with body tilting (angular turn)."""
+    def turn_right_angle(self, steps: int = 1, angle: int = 30):
+        """Turn right. angle is the leg swing parameter, actual turn ≈ angle × 0.44 per step."""
         if MOCK_MODE:
-            logger.info(f"[MOCK] turn_right_angle({steps})")
+            logger.info(f"[MOCK] turn_right_angle({steps}, angle={angle})")
         else:
+            self.crawler.angle = angle
             self.crawler.do_action("turn right angle", steps, self.speed)
             time.sleep(0.3)
-        self.heading = (self.heading + DEGREES_PER_TURN_STEP * steps) % 360
 
     def nod(self, steps: int = 2):
         """Nod head up and down."""
@@ -282,95 +258,84 @@ class CrawlerControl:
             speaker.announce_obstacle()
         return blocked
 
-    def navigate_to(self, target_x: float, target_y: float) -> bool:
+    # ── Patrol route ────────────────────────────────────────
+    # Each step is (action, args).
+    # Modify this list to match your mini city layout.
+    PATROL_ROUTE = [
+        ("forward", 5),
+        ("turn_left", 90),
+        ("forward", 2),
+        ("turn_right", 90),
+        ("forward", 2),
+    ]
+
+    def patrol_route(self, should_stop=None):
         """
-        Navigate to target (x_cm, y_cm) with obstacle avoidance.
+        Walk a fixed patrol route with obstacle avoidance.
 
-        Returns True if reached, False if blocked.
+        Executes each step in PATROL_ROUTE sequentially.
+        During forward steps, checks ultrasonic before each sub-step.
+        If obstacle detected, backs up and waits until clear.
+
+        Args:
+            should_stop: callable returning True to abort patrol early.
         """
-        result = self.navigate_to_interruptible(target_x, target_y)
-        return result["reached"]
+        if not self._standing:
+            self.stand()
 
-    def navigate_to_interruptible(
-        self,
-        target_x: float,
-        target_y: float,
-        check_interrupt_fn=None,
-    ) -> dict:
-        """
-        Navigate to target with obstacle avoidance and optional interrupt.
+        logger.info(f"patrol_route: started, {len(self.PATROL_ROUTE)} steps")
 
-        check_interrupt_fn: callable returning True to interrupt movement.
+        for i, (action, count) in enumerate(self.PATROL_ROUTE):
+            if should_stop and should_stop():
+                logger.info(f"patrol_route: aborted at step {i+1}")
+                return
 
-        Returns: {"reached": bool, "interrupted": bool, "position": (x, y)}
-        """
-        dx = target_x - self.x
-        dy = target_y - self.y
-        distance = math.sqrt(dx * dx + dy * dy)
+            logger.info(f"patrol_route: step {i+1}/{len(self.PATROL_ROUTE)} — {action}({count})")
 
-        if distance < STEP_DISTANCE_CM:
-            return {"reached": True, "interrupted": False, "position": (self.x, self.y)}
+            if action == "forward":
+                self._forward_with_avoidance(count, should_stop)
+            elif action == "backward":
+                self.backward(count)
+            elif action == "turn_left":
+                self.turn_left_angle(2, angle=count)
+            elif action == "turn_right":
+                self.turn_right_angle(2, angle=count)
+            else:
+                logger.warning(f"patrol_route: unknown action '{action}'")
 
-        # Calculate target heading (0° = positive Y, clockwise)
-        target_heading = math.degrees(math.atan2(dx, dy)) % 360
-        self._turn_to_heading(target_heading)
+        logger.info("patrol_route: route completed")
 
-        # Walk forward step by step
-        steps_needed = int(distance / STEP_DISTANCE_CM)
-        for i in range(steps_needed):
-            # Check for interrupt between steps
-            if check_interrupt_fn and check_interrupt_fn():
-                logger.info(f"Navigation interrupted at step {i+1}/{steps_needed}")
-                return {"reached": False, "interrupted": True, "position": (self.x, self.y)}
+    def _forward_with_avoidance(self, steps, should_stop=None):
+        """Walk forward N steps, avoiding obstacles along the way."""
+        walked = 0
+        while walked < steps:
+            if should_stop and should_stop():
+                return
 
             if self.check_obstacle():
-                logger.info(f"Obstacle at step {i+1}/{steps_needed}, attempting detour")
-                if not self._detour():
-                    logger.warning("Detour failed, skipping waypoint")
-                    return {"reached": False, "interrupted": False, "position": (self.x, self.y)}
-                # Recalculate heading after detour
-                dx = target_x - self.x
-                dy = target_y - self.y
-                if math.sqrt(dx * dx + dy * dy) < STEP_DISTANCE_CM:
-                    return {"reached": True, "interrupted": False, "position": (self.x, self.y)}
-                target_heading = math.degrees(math.atan2(dx, dy)) % 360
-                self._turn_to_heading(target_heading)
+                logger.info(f"_forward_with_avoidance: obstacle at step {walked+1}/{steps}, detour")
+                self._detour()
+            else:
+                self.forward(1)
+                walked += 1
 
-            self.forward(1)
-
-        logger.info(f"Reached waypoint ({target_x:.1f}, {target_y:.1f}), "
-                    f"actual pos ({self.x:.1f}, {self.y:.1f})")
-        return {"reached": True, "interrupted": False, "position": (self.x, self.y)}
-
-    def _turn_to_heading(self, target_heading: float):
-        """Turn to face target heading using shortest rotation."""
-        diff = (target_heading - self.heading) % 360
-        if diff == 0:
-            return
-
-        if diff <= 180:
-            steps = round(diff / DEGREES_PER_TURN_STEP)
-            if steps > 0:
-                self.turn_right(steps)
-        else:
-            steps = round((360 - diff) / DEGREES_PER_TURN_STEP)
-            if steps > 0:
-                self.turn_left(steps)
-
-    def _detour(self) -> bool:
-        """Simple detour: turn left, walk a few steps, turn back."""
-        self.turn_left(5)   # ~90 degrees
-        self.forward(3)     # sidestep
-        self.turn_right(5)  # face original direction
-        self.forward(3)     # pass the obstacle
-        return True
-
-    def get_position(self) -> tuple:
-        """Returns (x_cm, y_cm, heading_deg)."""
-        return (self.x, self.y, self.heading)
-
-    def reset_position(self):
-        """Reset dead reckoning to origin."""
-        self.x = 0.0
-        self.y = 0.0
-        self.heading = 0.0
+    def _detour(self):
+        """
+        Detour around obstacle:
+        1. Back up
+        2. Turn left 90°
+        3. Walk forward (sidestep)
+        4. Turn right 90° (face original direction)
+        5. Walk forward (pass the obstacle)
+        6. Turn right 90°
+        7. Walk forward (back to original line)
+        8. Turn left 90° (face original direction)
+        """
+        self.backward(2)
+        self.turn_left_angle(2, angle=90)   # ~90° left
+        self.forward(1)                      # sidestep
+        self.turn_right_angle(2, angle=90)  # face original direction
+        self.forward(2)                      # pass obstacle
+        self.turn_right_angle(2, angle=90)  # turn back toward original line
+        self.forward(1)                      # return to original line
+        self.turn_left_angle(2, angle=90)   # face original direction again

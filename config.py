@@ -49,7 +49,5 @@ OASF_ADDRESS = os.getenv("OASF_ADDRESS", "")        # e.g. "10.229.117.154:31234
 SPEAKER_ENABLED = os.getenv("SPEAKER_ENABLED", "false").lower() in ("true", "1", "yes")
 
 # Calibration (measure and adjust per robot)
-STEP_DISTANCE_CM = float(os.getenv("STEP_DISTANCE_CM", "2.5"))
-DEGREES_PER_TURN_STEP = float(os.getenv("DEGREES_PER_TURN_STEP", "18.0"))
-OBSTACLE_THRESHOLD_CM = float(os.getenv("OBSTACLE_THRESHOLD_CM", "5.0"))
+OBSTACLE_THRESHOLD_CM = float(os.getenv("OBSTACLE_THRESHOLD_CM", "20.0"))
 PATROL_SPEED = int(os.getenv("PATROL_SPEED", "50"))
