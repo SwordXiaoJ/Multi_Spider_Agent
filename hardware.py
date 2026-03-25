@@ -2,25 +2,19 @@
 Hardware driver: PiCrawler servo control with ultrasonic obstacle avoidance.
 
 Talks directly to PiCrawler servos and ultrasonic sensor.
-MOCK_MODE (default): only logs actions, no hardware movement.
-Set MOCK_MODE=false to drive the real robot.
 """
 
 import time
 import signal
 import logging
 
-from agent_picrawler.config import (
-    MOCK_MODE, OBSTACLE_THRESHOLD_CM, PATROL_SPEED,
-)
+from agent_picrawler.config import OBSTACLE_THRESHOLD_CM, PATROL_SPEED
 from agent_picrawler import speaker
 
 logger = logging.getLogger(__name__)
 
-# Only import hardware when not mocking
-if not MOCK_MODE:
-    from picrawler import Picrawler
-    from robot_hat import Ultrasonic, Pin
+from picrawler import Picrawler
+from robot_hat import Ultrasonic, Pin
 
 
 class Timeout(Exception):
@@ -39,184 +33,121 @@ class CrawlerControl:
     def __init__(self, speed: int = PATROL_SPEED):
         self.speed = speed
         self._standing = False
-
-        if MOCK_MODE:
-            logger.info("[MOCK] CrawlerControl initialized (no hardware)")
-            self.crawler = None
-            self.sonar = None
-        else:
-            self.crawler = Picrawler()
-            self.sonar = Ultrasonic(Pin("D2"), Pin("D3"))
-            signal.signal(signal.SIGALRM, _alarm_handler)
-            logger.info("CrawlerControl initialized with hardware")
+        self.crawler = Picrawler()
+        self.sonar = Ultrasonic(Pin("D2"), Pin("D3"))
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        logger.info("CrawlerControl initialized with hardware")
 
     def stand(self):
         """Stand up."""
-        if MOCK_MODE:
-            logger.info("[MOCK] stand()")
-        else:
-            self.crawler.do_action("stand", 1, self.speed)
-            time.sleep(0.5)
+        self.crawler.do_action("stand", 1, self.speed)
+        time.sleep(0.5)
         self._standing = True
 
     def sit(self):
         """Sit down."""
-        if MOCK_MODE:
-            logger.info("[MOCK] sit()")
-        else:
-            self.crawler.do_step("sit", self.speed)
-            time.sleep(0.5)
+        self.crawler.do_step("sit", self.speed)
+        time.sleep(0.5)
         self._standing = False
 
     def forward(self, steps: int = 1):
         """Move forward N steps."""
         for i in range(steps):
-            if MOCK_MODE:
-                logger.info(f"[MOCK] forward step {i+1}/{steps}")
-            else:
-                self.crawler.do_action("forward", 1, self.speed)
-                time.sleep(0.3)
+            self.crawler.do_action("forward", 1, self.speed)
+            time.sleep(0.3)
 
     def backward(self, steps: int = 1):
         """Move backward N steps."""
         for i in range(steps):
-            if MOCK_MODE:
-                logger.info(f"[MOCK] backward step {i+1}/{steps}")
-            else:
-                self.crawler.do_action("backward", 1, self.speed)
-                time.sleep(0.3)
+            self.crawler.do_action("backward", 1, self.speed)
+            time.sleep(0.3)
 
     def turn_left(self, steps: int = 1):
         """Turn left N steps."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] turn_left({steps})")
-        else:
-            self.crawler.do_action("turn left", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.do_action("turn left", steps, self.speed)
+        time.sleep(0.3)
 
     def turn_right(self, steps: int = 1):
         """Turn right N steps."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] turn_right({steps})")
-        else:
-            self.crawler.do_action("turn right", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.do_action("turn right", steps, self.speed)
+        time.sleep(0.3)
 
     def push_up(self, steps: int = 1):
         """Do push-ups."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] push_up({steps})")
-        else:
-            self.crawler.do_action("push up", steps, self.speed)
-            time.sleep(0.5)
+        self.crawler.do_action("push up", steps, self.speed)
+        time.sleep(0.5)
 
     def wave(self, steps: int = 1):
         """Wave gesture."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] wave({steps})")
-        else:
-            self.crawler.do_action("wave", steps, self.speed)
-            time.sleep(0.5)
+        self.crawler.do_action("wave", steps, self.speed)
+        time.sleep(0.5)
 
     def look_left(self, steps: int = 1):
         """Look left."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] look_left({steps})")
-        else:
-            self.crawler.do_action("look left", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.do_action("look left", steps, self.speed)
+        time.sleep(0.3)
 
     def look_right(self, steps: int = 1):
         """Look right."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] look_right({steps})")
-        else:
-            self.crawler.do_action("look right", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.do_action("look right", steps, self.speed)
+        time.sleep(0.3)
 
     def look_up(self, steps: int = 1):
         """Look up."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] look_up({steps})")
-        else:
-            self.crawler.do_action("look up", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.do_action("look up", steps, self.speed)
+        time.sleep(0.3)
 
     def look_down(self, steps: int = 1):
         """Look down."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] look_down({steps})")
-        else:
-            self.crawler.do_action("look down", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.do_action("look down", steps, self.speed)
+        time.sleep(0.3)
 
     def dance(self, steps: int = 1):
         """Dance."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] dance({steps})")
-        else:
-            self.crawler.do_action("dance", steps, self.speed)
-            time.sleep(0.5)
+        self.crawler.do_action("dance", steps, self.speed)
+        time.sleep(0.5)
 
     def turn_left_angle(self, steps: int = 1, angle: int = 30):
         """Turn left. angle is the leg swing parameter, actual turn ≈ angle × 0.44 per step."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] turn_left_angle({steps}, angle={angle})")
-        else:
-            self.crawler.angle = angle
-            self.crawler.do_action("turn left angle", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.angle = angle
+        self.crawler.do_action("turn left angle", steps, self.speed)
+        time.sleep(0.3)
 
     def turn_right_angle(self, steps: int = 1, angle: int = 30):
         """Turn right. angle is the leg swing parameter, actual turn ≈ angle × 0.44 per step."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] turn_right_angle({steps}, angle={angle})")
-        else:
-            self.crawler.angle = angle
-            self.crawler.do_action("turn right angle", steps, self.speed)
-            time.sleep(0.3)
+        self.crawler.angle = angle
+        self.crawler.do_action("turn right angle", steps, self.speed)
+        time.sleep(0.3)
 
     def nod(self, steps: int = 2):
         """Nod head up and down."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] nod({steps})")
-        else:
-            for _ in range(steps):
-                self.crawler.do_action("look up", 1, self.speed)
-                time.sleep(0.2)
-                self.crawler.do_action("look down", 1, self.speed)
-                time.sleep(0.2)
-            self.crawler.do_action("stand", 1, self.speed)
-            time.sleep(0.3)
+        for _ in range(steps):
+            self.crawler.do_action("look up", 1, self.speed)
+            time.sleep(0.2)
+            self.crawler.do_action("look down", 1, self.speed)
+            time.sleep(0.2)
+        self.crawler.do_action("stand", 1, self.speed)
+        time.sleep(0.3)
 
     def shake_head(self, steps: int = 2):
         """Shake head side to side."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] shake_head({steps})")
-        else:
-            for _ in range(steps):
-                self.crawler.do_action("look left", 1, self.speed)
-                time.sleep(0.2)
-                self.crawler.do_action("look right", 1, self.speed)
-                time.sleep(0.2)
-            self.crawler.do_action("stand", 1, self.speed)
-            time.sleep(0.3)
+        for _ in range(steps):
+            self.crawler.do_action("look left", 1, self.speed)
+            time.sleep(0.2)
+            self.crawler.do_action("look right", 1, self.speed)
+            time.sleep(0.2)
+        self.crawler.do_action("stand", 1, self.speed)
+        time.sleep(0.3)
 
     def shake_hand(self, steps: int = 2):
         """Extend front leg for handshake."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] shake_hand({steps})")
-        else:
-            self.crawler.do_action("wave", steps, self.speed)
-            time.sleep(0.5)
+        self.crawler.do_action("wave", steps, self.speed)
+        time.sleep(0.5)
 
     def play_dead(self, steps: int = 1):
         """Flip over and play dead."""
-        if MOCK_MODE:
-            logger.info(f"[MOCK] play_dead({steps})")
-        else:
-            self.crawler.do_step("sit", self.speed)
-            time.sleep(0.5)
+        self.crawler.do_step("sit", self.speed)
+        time.sleep(0.5)
         self._standing = False
 
     def read_distance(self) -> float | None:
@@ -224,10 +155,6 @@ class CrawlerControl:
         Read ultrasonic distance with median filter (from avoid.py pattern).
         Returns distance in cm, or None if read failed.
         """
-        if MOCK_MODE:
-            logger.debug("[MOCK] read_distance() → 100.0 (no obstacle)")
-            return 100.0
-
         vals = []
         for _ in range(5):
             try:

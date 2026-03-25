@@ -8,7 +8,7 @@ Non-blocking by default so it doesn't slow down missions.
 import logging
 import os
 
-from agent_picrawler.config import MOCK_MODE, SPEAKER_ENABLED
+from agent_picrawler.config import SPEAKER_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ SOUND_MAP = {
     "alert": "vigilance.wav",
 }
 
-if SPEAKER_ENABLED and not MOCK_MODE:
+if SPEAKER_ENABLED:
     from robot_hat import Music, TTS
     _music = Music()
     _tts = TTS()
@@ -38,9 +38,6 @@ else:
 def say(text: str):
     """Speak text aloud using local TTS."""
     if not SPEAKER_ENABLED:
-        return
-    if MOCK_MODE:
-        logger.info(f"[MOCK] TTS: {text}")
         return
     try:
         _tts.say(text)
@@ -58,9 +55,6 @@ def play_sound(event: str):
         return
 
     path = os.path.join(SOUNDS_DIR, filename)
-    if MOCK_MODE:
-        logger.info(f"[MOCK] Sound: {event} -> {filename}")
-        return
     try:
         _music.sound_play_threading(path)
     except Exception as e:

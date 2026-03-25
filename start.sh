@@ -1,19 +1,10 @@
 #!/bin/bash
 # Start PiCrawler patrol agent
-# Usage: ./start.sh          (mock mode, safe)
-#        ./start.sh real     (real hardware, robot WILL move)
 
 set -e
 
-if [ "$1" = "real" ]; then
-    export MOCK_MODE=false
-else
-    export MOCK_MODE="${MOCK_MODE:-true}"
-fi
-
 echo "============================================"
 echo "  PiCrawler Agent Startup"
-echo "  MOCK_MODE=$MOCK_MODE"
 echo "============================================"
 
 # Start camera stream

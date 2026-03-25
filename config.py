@@ -38,9 +38,6 @@ LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-# Mock mode: True = only log, no hardware movement
-MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() in ("true", "1", "yes")
-
 # ADS registration (empty = skip registration)
 ADS_ADDRESS = os.getenv("ADS_ADDRESS", "")          # e.g. "10.229.117.154:8888"
 OASF_ADDRESS = os.getenv("OASF_ADDRESS", "")        # e.g. "10.229.117.154:31234"

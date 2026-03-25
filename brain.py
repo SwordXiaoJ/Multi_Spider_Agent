@@ -14,7 +14,7 @@ import logging
 import requests
 
 from agent_picrawler.config import (
-    LLM_MODEL, OPENAI_API_KEY, ANTHROPIC_API_KEY, MOCK_MODE,
+    LLM_MODEL, OPENAI_API_KEY, ANTHROPIC_API_KEY,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,11 +48,9 @@ class LLMClient:
 
     def _call(self, system_prompt: str, user_prompt: str) -> str:
         """Make a single LLM API call. Returns response text."""
-        if MOCK_MODE or not self.api_key:
-            logger.info(f"[MOCK] LLM call (no API key or mock mode)")
-            logger.info(f"[MOCK] System: {system_prompt[:100]}...")
-            logger.info(f"[MOCK] User: {user_prompt[:100]}...")
-            return '{"mock": true}'
+        if not self.api_key:
+            logger.warning("LLM call skipped: no API key configured")
+            return '{"error": "no API key"}'
 
         try:
             if self.provider == "anthropic":
@@ -103,6 +101,45 @@ class LLMClient:
         resp.raise_for_status()
         data = resp.json()
         return data["content"][0]["text"]
+
+    def decompose_actions(self, prompt: str, available_actions: list) -> list:
+        """
+        Parse a natural language command into an ordered list of robot actions.
+
+        Called when Central sends task_type="direct_control" with a free-text prompt.
+        The LLM decomposes the prompt into a sequence of executable actions.
+
+        Returns: list of action name strings, e.g. ["wave", "dance"]
+        """
+        system = (
+            "You are a PiCrawler robot controller. Parse the user command into "
+            "an ordered list of actions. Available actions:\n"
+            f"{', '.join(available_actions)}\n\n"
+            "Rules:\n"
+            "- Only use actions from the list above\n"
+            "- The robot must stand_up before it can move or perform gestures. "
+            "If the command implies movement or gestures and doesn't start with stand_up, "
+            "prepend stand_up automatically.\n"
+            "- Output JSON: {\"actions\": [\"action1\", \"action2\", ...]}\n"
+            "- Only return valid JSON, nothing else."
+        )
+        user = prompt
+
+        result = self._call(system, user)
+
+        try:
+            parsed = json.loads(result)
+            actions = parsed.get("actions", [])
+            # Validate each action
+            valid = [a for a in actions if a in available_actions]
+            if not valid:
+                logger.warning(f"No valid actions from LLM decomposition: {actions}")
+                return ["stop"]
+            logger.info(f"LLM decomposed '{prompt}' → {valid}")
+            return valid
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse LLM decomposition: {result}")
+            return ["stop"]
 
     def decide_observation_response(
         self,

@@ -30,7 +30,7 @@ from a2a.types import (
 from a2a.utils import new_task
 from a2a.utils.errors import ServerError
 
-from agent_picrawler.config import AGENT_ID, AGENT_PORT, MOCK_MODE, STREAM_BASE_URL, ADS_ADDRESS, OASF_ADDRESS
+from agent_picrawler.config import AGENT_ID, AGENT_PORT, STREAM_BASE_URL, ADS_ADDRESS, OASF_ADDRESS
 from agent_picrawler.capabilities import get_capabilities_json
 from agent_picrawler.hardware import CrawlerControl
 from agent_picrawler.brain import LLMClient
@@ -151,8 +151,27 @@ class CrawlerAgentExecutor(AgentExecutor):
         }
 
     async def _execute_mode(self, message: Message, metadata: dict) -> dict:
-        """Execute mode: run steps sequentially."""
+        """Execute mode: run steps sequentially.
+
+        Supports two formats:
+        1. New: {task_type: "direct_control", prompt: "wave then dance"}
+           → LLM decomposes prompt into action sequence
+        2. Legacy: {steps: [{action: "wave", description: "..."}]}
+           → Direct execution
+        """
         steps = metadata.get("steps", [])
+
+        # New format: LLM decomposes prompt into actions
+        if not steps and metadata.get("task_type") == "direct_control":
+            prompt = metadata.get("prompt", "")
+            if prompt:
+                from agent_picrawler.capabilities import ACTION_NAMES
+                logger.info(f"Direct control: LLM decomposing '{prompt}'")
+                actions = self.manager.llm.decompose_actions(prompt, ACTION_NAMES)
+                steps = [{"action": a, "description": a.replace("_", " ")} for a in actions]
+            else:
+                steps = [{"action": "stop", "description": "No prompt provided"}]
+
         if not steps:
             action = metadata.get("action", "stop")
             steps = [{"action": action, "description": f"Direct: {action}"}]
@@ -191,7 +210,6 @@ async def health(request: Request):
         "status": "ok",
         "agent_id": AGENT_ID,
         "uptime_s": int(time.time() - _start_time),
-        "mock_mode": MOCK_MODE,
     })
 
 
@@ -199,7 +217,6 @@ async def agent_status(request: Request):
     data = {
         "agent_id": AGENT_ID,
         "uptime_s": int(time.time() - _start_time),
-        "mock_mode": MOCK_MODE,
     }
     if _manager:
         data["standing"] = _manager.control._standing
@@ -262,7 +279,6 @@ async def main():
     print(f"PiCrawler Agent (LangGraph)")
     print(f"Agent: {AGENT_ID}")
     print(f"Port: {AGENT_PORT}")
-    print(f"Mock: {os.getenv('MOCK_MODE', 'true')}")
     print("=" * 60)
 
     global _manager
